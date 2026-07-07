@@ -1,0 +1,218 @@
+# CloudflareSpeedTestDNS 示例配置文件
+# 使用方式: ./cfstd -c config.toml
+
+#######################
+# 延迟测速相关参数
+#######################
+
+# 延迟测速线程数 (默认 200，最多 1000)
+routines = 200
+
+# 延迟测速次数 (默认 4 次)
+ping_times = 4
+
+# 指定测速端口 (默认 443)
+tcp_port = 443
+
+# 平均延迟上限，单位毫秒 (默认 9999 ms)
+max_delay = 9999
+
+# 平均延迟下限，单位毫秒 (默认 0 ms)
+min_delay = 0
+
+# 丢包几率上限，范围 0.00~1.00 (默认 1.00，0 表示过滤掉任何丢包的 IP)
+max_loss_rate = 1.0
+
+#######################
+# HTTP测速相关参数
+#######################
+
+# 切换测速模式为 HTTP (默认 false，即使用 TCPing)
+httping = false
+
+# 有效状态代码 (默认 0，表示使用 200 301 302)
+httping_code = 0
+
+# 匹配指定地区，IATA 机场地区码或国家/城市码，英文逗号分隔 (默认空，表示所有地区)
+cfcolo = ""
+
+#######################
+# 下载测速相关参数
+#######################
+
+# 下载测速数量 (默认 10 个)
+test_count = 10
+
+# 下载测速时间，单位秒 (默认 10 秒)
+download_time = 10
+
+# 指定测速地址 (默认 "https://cf.xiu2.xyz/url")
+url = "https://cf.xiu2.xyz/url"
+
+# 下载速度下限，单位 MB/s (默认 0.00 MB/s)
+min_speed = 0.0
+
+# 禁用下载测速 (默认 false)
+disable_download = false
+
+#######################
+# 输入输出相关参数
+#######################
+
+# 显示结果数量 (默认 10 个，为 0 时不显示结果直接退出)
+print_num = 10
+
+# 同步到DNS的记录数量 (默认 1 个，独立于 print_num)
+dns_num = 1
+
+# 最少结果数量 (默认 0，为 0 时不检查结果数量)
+min_num = 0
+
+# 最大尝试次数 (默认 10 次)
+max_attempts = 10
+
+# IPv4段数据文件，可以填写文件路径或URL (默认为空)
+# 指定后仅测试IPv4地址，忽略文件中的非IPv4地址
+ipv4_file = ""
+
+# IPv6段数据文件，可以填写文件路径或URL (默认为空)
+# 指定后仅测试IPv6地址，忽略文件中的非IPv6地址
+ipv6_file = ""
+
+# IP段数据文件，可以填写文件路径或URL (默认 "ip.txt")
+# 指定ipv4_file或ipv6_file时该选项无效
+ip_file = "ip.txt"
+
+# 指定IP段数据，英文逗号分隔 (默认空)
+ip_text = ""
+
+# 输出结果文件 (默认 "result.csv"，为空时不输出文件)
+output = "result.csv"
+
+# 日志文件 (默认空，即不创建日志文件)
+log_file = ""
+
+#######################
+# 其他选项
+#######################
+
+# 测速全部IP (默认 false，表示每个 /24 段随机测速一个 IP)
+test_all = false
+
+# 调试输出模式 (默认 false)
+debug = false
+
+#######################
+# 阿里云DNS相关参数
+#######################
+
+[alidns]
+# 是否启用阿里云DNS (默认 false)
+enable = false
+
+# 阿里云AccessKeyID
+accesskey_id = ""
+
+# 阿里云AccessKeySecret
+accesskey_secret = ""
+
+# 域名
+domain = "example.com"
+
+# 子域名
+subdomain = "www"
+
+# TTL (默认 600)
+ttl = 600
+
+#######################
+# DNSPod DNS相关参数
+#######################
+
+[dnspod]
+# 是否启用DNSPod DNS (默认 false)
+enable = false
+
+# DNSPod Secret ID
+secret_id = ""
+
+# DNSPod Secret Key
+secret_key = ""
+
+# 域名
+domain = "example.com"
+
+# 子域名
+subdomain = "www"
+
+# TTL (默认 600)
+ttl = 600
+
+#######################
+# Cloudflare DNS相关参数
+#######################
+
+[cloudflare]
+# 是否启用Cloudflare DNS (默认 false)
+enable = false
+
+# Cloudflare API Token
+api_token = ""
+
+# Cloudflare 域名 Zone ID
+zone_id = ""
+
+# 域名
+domain = "example.com"
+
+# 子域名
+subdomain = "www"
+
+# 是否开启Cloudflare代理 (默认 false)
+proxied = false
+
+# TTL (1为自动，默认 1)
+ttl = 1
+
+#######################
+# Cloudflare KV相关参数
+#######################
+
+[cfkv]
+# 是否启用Cloudflare KV (默认 false)
+enable = false
+
+# Cloudflare API Token
+api_token = ""
+
+# Cloudflare Account ID
+account_id = ""
+
+# Cloudflare KV Namespace ID
+namespace_id = ""
+
+# 域名
+domain = "example.com"
+
+# 子域名         
+subdomain = "cf"
+
+#######################
+# Cron 定时任务相关参数
+#######################
+
+[cron]
+# 是否启用定时任务 (默认 false)
+enable = false
+
+# 延迟阈值(毫秒) (默认 9999 ms)
+latency_threshold = 9999
+
+# 丢包率阈值 (默认 1.0)
+loss_rate_threshold = 1.0
+
+# 检测间隔(分钟) (默认 30)
+check_interval = 30
+
+# 强制刷新间隔(小时) (默认 24)
+test_interval = 24

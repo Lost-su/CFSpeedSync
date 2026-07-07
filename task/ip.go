@@ -1,0 +1,279 @@
+package task
+
+import (
+	"bufio"
+	"io"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/Lyxot/CloudflareSpeedTestDNS/utils"
+)
+
+// isURL a string is a URL
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// readIPsFromURL downloads the content from a URL and returns it as a slice of strings
+func readIPsFromURL(url string) ([]string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			if utils.Debug {
+				utils.LogError("Error closing response body: %v", err)
+			}
+		}
+	}(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return strings.Split(string(body), "\n"), nil
+}
+
+const defaultInputFile = "ip.txt"
+
+var (
+	// TestAll test all ip
+	TestAll = false
+	// IPFile is the filename of IP Ranges
+	IPFile = defaultInputFile
+	// IPv4File is the filename of IPv4 Ranges
+	IPv4File = ""
+	// IPv6File is the filename of IPv6 Ranges
+	IPv6File = ""
+	IPText   string
+)
+
+// IsIPv4 判断是否为IPv4地址
+func IsIPv4(ip string) bool {
+	return strings.Contains(ip, ".")
+}
+
+func randIPEndWith(num byte) byte {
+	if num == 0 { // 对于 /32 这种单独的 IP
+		return byte(0)
+	}
+	return byte(rand.Intn(int(num)))
+}
+
+type IPRanges struct {
+	ips     []*net.IPAddr
+	mask    string
+	firstIP net.IP
+	ipNet   *net.IPNet
+}
+
+func newIPRanges() *IPRanges {
+	return &IPRanges{
+		ips: make([]*net.IPAddr, 0),
+	}
+}
+
+// 如果是单独 IP 则加上子网掩码，反之则获取子网掩码(r.mask)
+func (r *IPRanges) fixIP(ip string) string {
+	// 如果不含有 '/' 则代表不是 IP 段，而是一个单独的 IP，因此需要加上 /32 /128 子网掩码
+	if i := strings.IndexByte(ip, '/'); i < 0 {
+		if IsIPv4(ip) {
+			r.mask = "/32"
+		} else {
+			r.mask = "/128"
+		}
+		ip += r.mask
+	} else {
+		r.mask = ip[i:]
+	}
+	return ip
+}
+
+// 解析 IP 段，获得 IP、IP 范围、子网掩码
+func (r *IPRanges) parseCIDR(ip string) {
+	var err error
+	if r.firstIP, r.ipNet, err = net.ParseCIDR(r.fixIP(ip)); err != nil {
+		utils.LogFatal("ParseCIDR err: %v", err)
+	}
+}
+
+func (r *IPRanges) appendIPv4(d byte) {
+	r.appendIP(net.IPv4(r.firstIP[12], r.firstIP[13], r.firstIP[14], d))
+}
+
+func (r *IPRanges) appendIP(ip net.IP) {
+	r.ips = append(r.ips, &net.IPAddr{IP: ip})
+}
+
+// 返回第四段 ip 的最小值及可用数目
+func (r *IPRanges) getIPRange() (minIP, hosts byte) {
+	minIP = r.firstIP[15] & r.ipNet.Mask[3] // IP 第四段最小值
+
+	// 根据子网掩码获取主机数量
+	m := net.IPv4Mask(255, 255, 255, 255)
+	for i, v := range r.ipNet.Mask {
+		m[i] ^= v
+	}
+	total, _ := strconv.ParseInt(m.String(), 16, 32) // 总可用 IP 数
+	if total > 255 {                                 // 矫正 第四段 可用 IP 数
+		hosts = 255
+		return
+	}
+	hosts = byte(total)
+	return
+}
+
+func (r *IPRanges) chooseIPv4() {
+	if r.mask == "/32" { // 单个 IP 则无需随机，直接加入自身即可
+		r.appendIP(r.firstIP)
+	} else {
+		minIP, hosts := r.getIPRange()    // 返回第四段 IP 的最小值及可用数目
+		for r.ipNet.Contains(r.firstIP) { // 只要该 IP 没有超出 IP 网段范围，就继续循环随机
+			if TestAll { // 如果是测速全部 IP
+				for i := 0; i <= int(hosts); i++ { // 遍历 IP 最后一段最小值到最大值
+					r.appendIPv4(byte(i) + minIP)
+				}
+			} else { // 随机 IP 的最后一段 0.0.0.X
+				r.appendIPv4(minIP + randIPEndWith(hosts))
+			}
+			r.firstIP[14]++ // 0.0.(X+1).X
+			if r.firstIP[14] == 0 {
+				r.firstIP[13]++ // 0.(X+1).X.X
+				if r.firstIP[13] == 0 {
+					r.firstIP[12]++ // (X+1).X.X.X
+				}
+			}
+		}
+	}
+}
+
+func (r *IPRanges) chooseIPv6() {
+	if r.mask == "/128" { // 单个 IP 则无需随机，直接加入自身即可
+		r.appendIP(r.firstIP)
+	} else {
+		var tempIP uint8                  // 临时变量，用于记录前一位的值
+		for r.ipNet.Contains(r.firstIP) { // 只要该 IP 没有超出 IP 网段范围，就继续循环随机
+			r.firstIP[15] = randIPEndWith(255) // 随机 IP 的最后一段
+			r.firstIP[14] = randIPEndWith(255) // 随机 IP 的最后一段
+
+			targetIP := make([]byte, len(r.firstIP))
+			copy(targetIP, r.firstIP)
+			r.appendIP(targetIP) // 加入 IP 地址池
+
+			for i := 13; i >= 0; i-- { // 从倒数第三位开始往前随机
+				tempIP = r.firstIP[i]              // 保存前一位的值
+				r.firstIP[i] += randIPEndWith(255) // 随机 0~255，加到当前位上
+				if r.firstIP[i] >= tempIP {        // 如果当前位的值大于等于前一位的值，说明随机成功了，可以退出该循环
+					break
+				}
+			}
+		}
+	}
+}
+
+// IsBothMode 判断是否同时测试IPv4和IPv6
+func IsBothMode() bool {
+	return IPv4File != "" && IPv6File != ""
+}
+
+// IsIPv4Mode 判断是否仅测试IPv4
+func IsIPv4Mode() bool {
+	return IPv4File != "" && IPv6File == ""
+}
+
+// IsIPv6Mode 判断是否仅测试IPv6
+func IsIPv6Mode() bool {
+	return IPv4File == "" && IPv6File != ""
+}
+
+// IsMixedMode 判断是否混合测试IPv4和IPv6
+func IsMixedMode() bool {
+	return IPv4File == "" && IPv6File == "" && IPFile != ""
+}
+
+func loadIPRanges() []*net.IPAddr {
+	ranges := newIPRanges()
+	if IPText != "" { // 从参数中获取 IP 段数据
+		IPs := strings.Split(IPText, ",") // 以逗号分隔为数组并循环遍历
+		for _, IP := range IPs {
+			IP = strings.TrimSpace(IP) // 去除首尾的空白字符（空格、制表符、换行符等）
+			if IP == "" {              // 跳过空的（即开头、结尾或连续多个 ,, 的情况）
+				continue
+			}
+			ranges.parseCIDR(IP) // 解析 IP 段，获得 IP、IP 范围、子网掩码
+			if IsIPv4(IP) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
+				ranges.chooseIPv4()
+			} else {
+				ranges.chooseIPv6()
+			}
+		}
+	} else { // 从文件中获取 IP 段数据
+		// 根据模式选择文件
+		var filename string
+		if IsIPv4Mode() {
+			filename = IPv4File
+		} else if IsIPv6Mode() {
+			filename = IPv6File
+		} else if IsMixedMode() {
+			filename = IPFile
+		} else {
+			// 默认情况，使用IPFile
+			if IPFile == "" {
+				IPFile = defaultInputFile
+			}
+			filename = IPFile
+		}
+
+		var lines []string
+		var err error
+
+		if isURL(filename) {
+			lines, err = readIPsFromURL(filename)
+			if err != nil {
+				utils.LogFatal("readIPsFromURL err: %v", err)
+			}
+		} else {
+			file, err := os.Open(filename)
+			if err != nil {
+				utils.LogFatal("os.Open err: %v", err)
+			}
+			defer func(file *os.File) {
+				err := file.Close()
+				if err != nil {
+					if utils.Debug {
+						utils.LogError("Error closing file: %v", err)
+					}
+				}
+			}(file)
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				lines = append(lines, scanner.Text())
+			}
+		}
+
+		for _, line := range lines {
+			line = strings.TrimSpace(line) // 去除首尾的空白字符（空格、制表符、换行符等）
+			if line == "" {                // 跳过空行
+				continue
+			}
+			// 根据当前模式决定是否处理该IP
+			if (IsIPv4Mode() && !IsIPv4(line)) || (IsIPv6Mode() && IsIPv4(line)) {
+				continue // 如果是IPv4模式但IP是IPv6，或者是IPv6模式但IP是IPv4，则跳过
+			}
+			ranges.parseCIDR(line) // 解析 IP 段，获得 IP、IP 范围、子网掩码
+			if IsIPv4(line) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
+				ranges.chooseIPv4()
+			} else {
+				ranges.chooseIPv6()
+			}
+		}
+	}
+	return ranges.ips
+}
