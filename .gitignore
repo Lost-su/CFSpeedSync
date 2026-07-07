@@ -1,0 +1,7 @@
+dist
+Releases
+*.exe
+*.csv
+cfst*
+CloudflareSpeedTest*
+.DS_Store
