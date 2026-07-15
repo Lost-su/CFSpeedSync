@@ -198,6 +198,36 @@ domain = "example.com"
 subdomain = "cf"
 
 #######################
+# 优良库相关参数
+#######################
+
+[excellent_pool]
+# 是否启用优良库 (默认 false)
+# 依赖 [cfkv] 配置，必须同时启用 cfkv 才会生效
+enable = false
+
+# 使用模式 (默认 "priority")
+#   priority : 优先测试优良库中的 IP，结果不足时再从 IP 段文件补充
+#   only     : 仅测试优良库中的 IP，不补充
+#   mixed    : 优良库 IP + IP 段文件合并后一起测速（优良库 IP 优先）
+use_mode = "priority"
+
+# 入库最低速度，单位 MB/s (默认 20.0)
+min_speed = 20.0
+
+# 入库最大延迟，单位毫秒 (默认 150)
+max_delay = 150
+
+# 入库最大丢包率，范围 0.00~1.00 (默认 0.0，即不允许丢包)
+max_loss_rate = 0.0
+
+# 单个域名优良库最大容量（IPv4 和 IPv6 各独立计算，默认 100）
+max_size = 100
+
+# 每次测速时自动移除不再满足标准的 IP（速度衰减处理，默认 true）
+auto_remove_slow = true
+
+#######################
 # Cron 定时任务相关参数
 #######################
 

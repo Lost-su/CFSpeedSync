@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/Lyxot/CloudflareSpeedTestDNS/conf"
@@ -211,9 +214,9 @@ func speedTest() ([]string, error) {
 		utils.LogInfo("[IPv4] 开始测试IPv4...")
 		task.IPv6File = ""
 		utils.Output = utils.GetFilenameWithSuffix(originOutput, "ipv4")
-		ipv4SpeedData, testErr := singleSpeedTest("IPv4") // 开始延迟测速 + 过滤延迟/丢包
+		ipv4SpeedData, testErr := singleSpeedTest("IPv4", "ipv4")
 		if testErr == nil {
-			ipData = append(ipData, ddnsSync(ipv4SpeedData)...) // 同步到DNS
+			ipData = append(ipData, ddnsSync(ipv4SpeedData)...)
 		} else {
 			err = testErr
 		}
@@ -223,9 +226,9 @@ func speedTest() ([]string, error) {
 		task.IPv4File = ""
 		task.IPv6File = origIPv6File
 		utils.Output = utils.GetFilenameWithSuffix(originOutput, "ipv6")
-		ipv6SpeedData, testErr := singleSpeedTest("IPv6") // 开始延迟测速 + 过滤延迟/丢包
+		ipv6SpeedData, testErr := singleSpeedTest("IPv6", "ipv6")
 		if testErr == nil {
-			ipData = append(ipData, ddnsSync(ipv6SpeedData)...) // 同步到DNS
+			ipData = append(ipData, ddnsSync(ipv6SpeedData)...)
 		} else {
 			err = errors.Join(err, testErr)
 		}
@@ -235,9 +238,18 @@ func speedTest() ([]string, error) {
 		task.IPv6File = origIPv6File
 		utils.Output = originOutput
 	} else {
-		speedData, testErr := singleSpeedTest("IP")
+		poolVer := "ip"
+		ipVer := "IP"
+		if task.IsIPv4Mode() {
+			poolVer = "ipv4"
+			ipVer = "IPv4"
+		} else if task.IsIPv6Mode() {
+			poolVer = "ipv6"
+			ipVer = "IPv6"
+		}
+		speedData, testErr := singleSpeedTest(ipVer, poolVer)
 		if testErr == nil {
-			ipData = ddnsSync(speedData) // 延迟测速 + 过滤延迟/丢包 + 同步到DNS
+			ipData = ddnsSync(speedData)
 		} else {
 			err = testErr
 		}
@@ -245,15 +257,156 @@ func speedTest() ([]string, error) {
 	return ipData, err
 }
 
-func singleSpeedTest(ipVersion string) (utils.DownloadSpeedSet, error) {
+func singleSpeedTest(ipVersion string, poolVersion string) (utils.DownloadSpeedSet, error) {
+	// 保存原始 IPText，优良库注入后需要恢复
+	origIPText := task.IPText
+	origIPFile := task.IPFile
+	origIPv4File := task.IPv4File
+	origIPv6File := task.IPv6File
+
+	poolLoaded := false
+	var poolEntries []ddns.ExcellentEntry
+
+	if poolVersion != "" && !conf.EnableExcellentPool {
+		utils.LogInfo("[优良库] 未启用，如需开启请在配置文件中设置 [excellent_pool] enable = true")
+	} else if conf.EnableExcellentPool && !conf.EnableCFKV {
+		utils.LogWarn("[优良库] 已启用优良库但 [cfkv] 未启用，优良库功能不生效")
+	} else if conf.EnableExcellentPool && conf.EnableCFKV && poolVersion != "" {
+		utils.LogInfo("[优良库] 已启用 (模式: %s, 入库标准: 速度≥%.1f MB/s, 延迟≤%d ms, 丢包率≤%.2f)",
+			conf.ExcellentPoolUseMode, conf.ExcellentPoolMinSpeed, conf.ExcellentPoolMaxDelay, conf.ExcellentPoolMaxLoss)
+		entries, err := ddns.LoadExcellentPool(poolVersion)
+		if err != nil {
+			utils.LogWarn("[优良库] 读取优良库失败，使用常规测速: %v", err)
+		} else if len(entries) > 0 {
+			poolEntries = entries
+			poolLoaded = true
+		} else {
+			utils.LogInfo("[优良库] 优良库为空（首次运行或已清空），使用常规测速")
+		}
+	}
+
+	var speedData utils.DownloadSpeedSet
+	var err error
+
+	switch {
+	case poolLoaded && conf.ExcellentPoolUseMode == "only":
+		// 仅用模式：只测优良库 IP
+		utils.LogInfo("[优良库] 仅用模式：使用优良库中 %d 个 %s 进行测速", len(poolEntries), ipVersion)
+		task.IPText = ddns.ExcellentEntriesToIPText(poolEntries)
+		task.IPFile = ""
+		task.IPv4File = ""
+		task.IPv6File = ""
+		speedData, err = runSpeedTest(ipVersion)
+
+	case poolLoaded && conf.ExcellentPoolUseMode == "mixed":
+		// 混合模式：优良库 IP + 原始 IP 段合并，优良库 IP 优先（放前面）
+		utils.LogInfo("[优良库] 混合模式：优先测试优良库中 %d 个 %s", len(poolEntries), ipVersion)
+		poolText := ddns.ExcellentEntriesToIPText(poolEntries)
+		if origIPText != "" {
+			task.IPText = poolText + "," + origIPText
+		} else {
+			task.IPText = poolText
+			// 混合模式下原有文件来源不变，IPText 已包含优良库，文件里的 IP 也会被加载
+			// 但 loadIPRanges 优先读 IPText，所以需要将文件 IP 也追加进来
+			// 通过保持文件变量不变，让 loadIPRanges 走文件路径，会忽略 IPText
+			// 因此将文件 IP 手动追加到 IPText
+			task.IPText = poolText + "," + loadFileIPsAsText(origIPFile, origIPv4File, origIPv6File)
+			task.IPFile = ""
+			task.IPv4File = ""
+			task.IPv6File = ""
+		}
+		speedData, err = runSpeedTest(ipVersion)
+
+	case poolLoaded: // priority 模式（默认）
+		// 优先模式：先测优良库，不够再用常规 IP 段补充
+		utils.LogInfo("[优良库] 优先模式：先测试优良库中 %d 个 %s", len(poolEntries), ipVersion)
+		task.IPText = ddns.ExcellentEntriesToIPText(poolEntries)
+		task.IPFile = ""
+		task.IPv4File = ""
+		task.IPv6File = ""
+		wantCount := task.TestCount // 保存下载测速会修改 task.TestCount，需在此先记录
+		speedData, err = runSpeedTest(ipVersion)
+
+		if err != nil || len(speedData) < wantCount {
+			utils.LogInfo("[优良库] 优良库结果不足(%d/%d)，使用常规IP段补充测速...", len(speedData), wantCount)
+			task.IPText = origIPText
+			task.IPFile = origIPFile
+			task.IPv4File = origIPv4File
+			task.IPv6File = origIPv6File
+			task.TestCount = wantCount // 恢复原始数量，避免被上一轮下载测速截断限制补充数
+			extraData, extraErr := runSpeedTest(ipVersion)
+			if extraErr == nil {
+				// 合并结果（优良库结果在前，补充结果追加），去重后按速度重排并截断到目标数量
+				seen := make(map[string]struct{}, len(speedData))
+				combined := make(utils.DownloadSpeedSet, 0, len(speedData)+len(extraData))
+				for _, d := range speedData {
+					seen[d.IP.String()] = struct{}{}
+					combined = append(combined, d)
+				}
+				for _, d := range extraData {
+					if _, dup := seen[d.IP.String()]; dup {
+						continue
+					}
+					seen[d.IP.String()] = struct{}{}
+					combined = append(combined, d)
+				}
+				sort.Slice(combined, func(i, j int) bool {
+					return combined[i].DownloadSpeed > combined[j].DownloadSpeed
+				})
+				if wantCount > 0 && len(combined) > wantCount {
+					combined = combined[:wantCount]
+				}
+				speedData = combined
+				err = nil
+			} else if len(speedData) == 0 {
+				err = extraErr
+			}
+		}
+
+	default:
+		// 优良库未启用或未加载，走原有逻辑
+		speedData, err = runSpeedTest(ipVersion)
+	}
+
+	// 恢复原始设置
+	task.IPText = origIPText
+	task.IPFile = origIPFile
+	task.IPv4File = origIPv4File
+	task.IPv6File = origIPv6File
+
+	if err != nil {
+		return speedData, err
+	}
+
+	utils.ExportCsv(speedData)
+	speedData.Print()
+
+	// 更新优良库
+	if conf.EnableExcellentPool && conf.EnableCFKV && poolVersion != "" {
+		var ipDataForPool []utils.IPData
+		if poolVersion == "ipv4" {
+			ipDataForPool = speedData.FilterIPv4()
+		} else if poolVersion == "ipv6" {
+			ipDataForPool = speedData.FilterIPv6()
+		} else {
+			ipDataForPool = append(speedData.FilterIPv4(), speedData.FilterIPv6()...)
+		}
+		if updateErr := ddns.UpdateExcellentPool(poolVersion, ipDataForPool); updateErr != nil {
+			utils.LogError("[优良库] 更新优良库失败: %v", updateErr)
+		}
+	}
+
+	return speedData, nil
+}
+
+// runSpeedTest 执行一轮延迟+下载测速，含重试逻辑
+func runSpeedTest(ipVersion string) (utils.DownloadSpeedSet, error) {
 	var speedData utils.DownloadSpeedSet
 	for i := 0; i < conf.MaxAttempts; i++ {
-		// 开始延迟测速 + 过滤延迟/丢包
 		pingData := task.NewPing().Run().FilterDelay().FilterLossRate()
-		// 开始下载测速
 		speedData = task.TestDownloadSpeed(pingData)
 		if len(speedData) >= conf.MinNum {
-			break
+			return speedData, nil
 		}
 		if i < conf.MaxAttempts-1 {
 			utils.LogWarn("符合条件的%s数量[%d]少于设定的最小数量[%d]，将在15秒后开始新一轮测试...", ipVersion, len(speedData), conf.MinNum)
@@ -263,10 +416,37 @@ func singleSpeedTest(ipVersion string) (utils.DownloadSpeedSet, error) {
 			return speedData, fmt.Errorf("符合条件的%s数量少于设定的最小数量", ipVersion)
 		}
 	}
-	utils.ExportCsv(speedData) // 输出文件
-	speedData.Print()          // 打印结果
-
 	return speedData, nil
+}
+
+// loadFileIPsAsText 将文件/IPText 中的 IP 段读取并拼接为逗号分隔字符串（用于 mixed 模式）
+func loadFileIPsAsText(ipFile, ipv4File, ipv6File string) string {
+	var filename string
+	if ipv4File != "" {
+		filename = ipv4File
+	} else if ipv6File != "" {
+		filename = ipv6File
+	} else if ipFile != "" {
+		filename = ipFile
+	}
+	if filename == "" {
+		return ""
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		utils.LogWarn("[优良库] 读取IP文件失败: %v", err)
+		return ""
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, ",")
 }
 
 func ddnsSync(speedData utils.DownloadSpeedSet) []string {

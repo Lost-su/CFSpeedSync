@@ -24,6 +24,14 @@ var (
 	MinNum            int
 	MaxAttempts       int
 	DnsNum            int
+
+	EnableExcellentPool     bool
+	ExcellentPoolUseMode    string
+	ExcellentPoolMinSpeed   float64
+	ExcellentPoolMaxDelay   int
+	ExcellentPoolMaxLoss    float64
+	ExcellentPoolMaxSize    int
+	ExcellentPoolAutoRemove bool
 )
 
 // Config 配置文件结构体
@@ -78,6 +86,9 @@ type Config struct {
 
 	// Cron 定时任务相关
 	Cron CronConfig `toml:"cron"`
+
+	// 优良库相关
+	ExcellentPool ExcellentPoolConfig `toml:"excellent_pool"`
 }
 
 // AliDNSConfig 阿里云DNS配置
@@ -119,6 +130,17 @@ type CloudflareKVConfig struct {
 	NamespaceID string `toml:"namespace_id"` // Cloudflare KV Namespace ID
 	Domain      string `toml:"domain"`       // 域名
 	Subdomain   string `toml:"subdomain"`    // 子域名
+}
+
+// ExcellentPoolConfig 优良库相关参数
+type ExcellentPoolConfig struct {
+	Enable         bool    `toml:"enable"`           // 是否启用优良库
+	UseMode        string  `toml:"use_mode"`         // 使用模式: "priority"(优先) / "only"(仅用) / "mixed"(混合)
+	MinSpeed       float64 `toml:"min_speed"`        // 入库最低速度（MB/s）
+	MaxDelay       int     `toml:"max_delay"`        // 入库最大延迟（ms）
+	MaxLossRate    float64 `toml:"max_loss_rate"`    // 入库最大丢包率
+	MaxSize        int     `toml:"max_size"`         // 单个域名最大容量
+	AutoRemoveSlow bool    `toml:"auto_remove_slow"` // 测速时自动移除不符合标准的IP
 }
 
 // CronConfig Cron 定时任务相关参数
@@ -199,6 +221,15 @@ func CreateDefaultConfig() *Config {
 			LossRateThreshold: 1.0,
 			CheckInterval:     30,
 			TestInterval:      24,
+		},
+		ExcellentPool: ExcellentPoolConfig{
+			Enable:         false,
+			UseMode:        "priority",
+			MinSpeed:       20.0,
+			MaxDelay:       150,
+			MaxLossRate:    0.0,
+			MaxSize:        100,
+			AutoRemoveSlow: true,
 		},
 	}
 }
@@ -364,4 +395,23 @@ func ApplyConfig(config *Config) {
 			TestInterval = time.Duration(config.Cron.TestInterval) * time.Hour
 		}
 	}
+
+	// 设置优良库相关参数
+	EnableExcellentPool = config.ExcellentPool.Enable
+	if config.ExcellentPool.UseMode != "" {
+		ExcellentPoolUseMode = config.ExcellentPool.UseMode
+	}
+	if config.ExcellentPool.MinSpeed > 0 {
+		ExcellentPoolMinSpeed = config.ExcellentPool.MinSpeed
+	}
+	if config.ExcellentPool.MaxDelay > 0 {
+		ExcellentPoolMaxDelay = config.ExcellentPool.MaxDelay
+	}
+	if config.ExcellentPool.MaxLossRate >= 0 {
+		ExcellentPoolMaxLoss = config.ExcellentPool.MaxLossRate
+	}
+	if config.ExcellentPool.MaxSize > 0 {
+		ExcellentPoolMaxSize = config.ExcellentPool.MaxSize
+	}
+	ExcellentPoolAutoRemove = config.ExcellentPool.AutoRemoveSlow
 }
