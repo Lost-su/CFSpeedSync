@@ -1,78 +1,216 @@
 # CFSpeedSync
 
-[![Go Version](https://img.shields.io/github/go-mod/go-version/Lyxot/CloudflareSpeedTestDNS?style=flat-square&label=Go&color=00ADD8&logo=go)](https://github.com/Lyxot/CloudflareSpeedTestDNS)
-[![Release](https://img.shields.io/github/v/release/Lyxot/CloudflareSpeedTestDNS?style=flat-square&label=Release&color=00ADD8&logo=github)](https://github.com/Lyxot/CloudflareSpeedTestDNS/releases/latest)
-[![License](https://img.shields.io/github/license/Lyxot/CloudflareSpeedTestDNS?style=flat-square&label=License&color=00ADD8&logo=github)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/Lost-su/CFSpeedSync?style=flat-square&label=Go&color=00ADD8&logo=go)](https://github.com/Lost-su/CFSpeedSync)
+[![Release](https://img.shields.io/github/v/release/Lost-su/CFSpeedSync?style=flat-square&label=Release&color=2F81F7&logo=github)](https://github.com/Lost-su/CFSpeedSync/releases)
+[![License](https://img.shields.io/github/license/Lost-su/CFSpeedSync?style=flat-square&label=License&color=3FB950&logo=opensourceinitiative)](LICENSE)
 
-基于 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 的 CDN 节点测速、优选 IP 和 DNS 同步工具。项目使用 Go 编写，支持 TCPing、HTTPing、下载测速、IPv4/IPv6 分离测速、Cloudflare Workers KV、阿里云 DNS、DNSPod（腾讯云 DNSPod）和 Cloudflare DNS。
+> Cloudflare 节点测速、优选 IP、DNS/KV 同步与 Worker 可视化工具。
 
-测速结果可以保存为 CSV，也可以写入 Cloudflare KV，再通过仓库内的 Worker 页面展示。启用 Cron 后，程序会定期检查当前 IP；延迟或丢包超过阈值时自动重新测速并更新 DNS/KV。
+CFSpeedSync 基于 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 开发。本地程序负责测速和同步，Cloudflare Worker 负责从 KV 读取数据并展示页面。
 
-## 功能概览
+**快速导航：** [五分钟部署](#quick-deploy) · [安装运行](#install) · [核心配置](#configuration) · [KV 与 Worker](#worker) · [DNS 同步](#dns) · [优良库与定时监控](#automation) · [故障排查](#troubleshooting)
 
-- TCP 延迟测速或 HTTP 延迟测速
-- 下载速度测速，并按最低速度筛选
-- 支持单个 IP、CIDR 网段、本地文件、远程 URL 和内联 IP 列表
-- IPv4、IPv6 分开测速，也可以同时测速
-- 延迟、丢包、测速线程、端口、测速数量等参数可配置
-- 自动同步到阿里云 DNS、DNSPod 和 Cloudflare DNS
-- 将结果写入 Cloudflare Workers KV，支持多个域名/线路前缀
-- Cloudflare KV 优良库：复用历史优质 IP，减少每次全量扫描
-- Cron 监控：周期性检查当前 IP，异常时自动刷新
-- worker_atlas.js、worker_modern.js 等 Web 展示页面
-- Windows、Linux、macOS 以及多种 ARM、MIPS、RISC-V、LoongArch 架构
-- 所有程序时间统一使用北京时间（UTC+8）
+---
 
-## 工作流程
+<a id="quick-deploy"></a>
+
+## 1. 五分钟部署：KV + Worker
+
+这是最短的完整使用路径，适合第一次部署：
+
+~~~text
+本地运行 CFSpeedSync
+        ↓
+测速结果写入 Cloudflare KV
+        ↓
+Worker 读取 KV
+        ↓
+浏览器查看测速结果
+~~~
+
+### 1.1 创建 Cloudflare KV
+
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)。
+2. 进入 **Workers & Pages -> KV**，部分新版控制台位于 **Storage & Databases -> KV**。
+3. 创建一个 Namespace，例如 <code>CFSpeedSync</code>。
+4. 记录该 KV 的 **Namespace ID**。
+5. 在 Cloudflare Account 首页记录 **Account ID**。
+
+### 1.2 创建 KV API Token
+
+1. 进入 **My Profile -> API Tokens -> Create Token**。
+2. 选择 **Create Custom Token**。
+3. 添加权限：**Account -> Workers KV Storage -> Edit**。
+4. 在 Account Resources 中选择自己的 Cloudflare 账号。
+5. 创建并保存 Token。该 Token 只会完整显示一次。
+
+> 基础展示只需要 KV 权限，不需要 DNS 编辑权限。
+
+### 1.3 配置本地程序
+
+解压 [Releases](https://github.com/Lost-su/CFSpeedSync/releases) 中下载的程序，将 <code>config.example.toml</code> 复制为 <code>config.toml</code>，然后修改其中的 <code>[cfkv]</code>：
+
+~~~toml
+[cfkv]
+enable = true
+api_token = "你的 KV API Token"
+account_id = "你的 Account ID"
+namespace_id = "你的 KV Namespace ID"
+
+# 可选：用于区分不同域名或线路
+domain = "example.com"
+subdomain = "cf"
+~~~
+
+如果只需要一组默认数据，可以将 <code>domain</code> 和 <code>subdomain</code> 都设置为空字符串：
+
+~~~toml
+domain = ""
+subdomain = ""
+~~~
+
+首次使用时，其他远程功能保持关闭即可：
+
+~~~toml
+[alidns]
+enable = false
+
+[dnspod]
+enable = false
+
+[cloudflare]
+enable = false
+
+[excellent_pool]
+enable = false
+
+[cron]
+enable = false
+~~~
+
+### 1.4 运行一次测速
+
+| 系统 | 命令 |
+| --- | --- |
+| Windows x64 | <code>.\cfstd-windows-x86_64.exe -c .\config.toml</code> |
+| Linux x64 | <code>chmod +x ./cfstd-linux-x86_64</code><br><code>./cfstd-linux-x86_64 -c ./config.toml</code> |
+| macOS Apple Silicon | <code>chmod +x ./cfstd-macos-aarch64</code><br><code>./cfstd-macos-aarch64 -c ./config.toml</code> |
+
+看到“同步到 Cloudflare KV 成功”后，打开 Cloudflare KV 检查数据。根据输入的 IP 类型，通常会出现：
+
+~~~text
+ipv4
+ipv4time
+ipv6
+ipv6time
+~~~
+
+配置了域名前缀时，key 会变成：
+
+~~~text
+cf.example.com:ipv4
+cf.example.com:ipv4time
+cf.example.com:ipv6
+cf.example.com:ipv6time
+~~~
+
+### 1.5 部署 Worker 页面
+
+1. 在 Cloudflare Dashboard 进入 **Workers & Pages**。
+2. 创建一个 Worker，使用 **Modules / ES Modules** 模式，并打开在线代码编辑器。
+3. 删除默认代码，复制 [worker_atlas.js](worker_atlas.js) 的全部内容。
+4. 保存并部署。
+5. 打开 Worker 的 **Settings -> Bindings**。
+6. 添加 **KV Namespace Binding**：
+
+   - Variable name：<code>KV_NAMESPACE</code>
+   - KV namespace：选择前面创建的 Namespace
+
+7. 保存并重新部署 Worker。
+8. 访问 Cloudflare 分配的 <code>workers.dev</code> 域名。
+
+> 只查看测速结果时，Worker 仅需要 <code>KV_NAMESPACE</code>。不需要配置 <code>ADMIN_TOKEN</code>、<code>CF_API_TOKEN</code> 或 <code>CF_ZONE_ID</code>。
+
+### 1.6 快速验收
+
+| 检查地址 | 正常结果 |
+| --- | --- |
+| Worker 首页 | 显示 IPv4/IPv6、速度、延迟和更新时间 |
+| <code>/healthz</code> | 返回服务健康信息 |
+| <code>/api/nodes</code> | 返回 JSON 格式的节点数据 |
+
+如果页面提示 <code>Missing KV binding: KV_NAMESPACE</code>，说明 KV 绑定名称错误，或者绑定后没有重新部署。如果页面可以打开但没有数据，请确认本地程序和 Worker 使用的是同一个 KV Namespace。
+
+---
+
+<a id="overview"></a>
+
+## 2. 项目说明
+
+### 2.1 主要功能
+
+| 分类 | 功能 |
+| --- | --- |
+| 测速 | TCPing、HTTPing、下载测速、延迟和丢包筛选 |
+| 输入 | 单个 IP、CIDR、本地文件、远程 URL、内联 IP |
+| 协议 | IPv4、IPv6，以及 IPv4/IPv6 分离测速 |
+| 输出 | 终端结果、CSV 文件、日志文件、Cloudflare KV |
+| DNS | 阿里云 DNS、DNSPod、Cloudflare DNS |
+| 自动化 | 优良库复用、异常检测、定时刷新 |
+| Web | 多线路切换、搜索、排序、JSON API、健康检查 |
+| 平台 | Windows、Linux、macOS、ARM、MIPS、RISC-V、LoongArch |
+
+### 2.2 工作流程
 
 ~~~text
 读取 IP/CIDR
     ↓
 延迟测速（TCP 或 HTTP）
     ↓
-按延迟、丢包率过滤
+按延迟和丢包率过滤
     ↓
 下载测速（可关闭）
     ↓
-按下载速度排序并输出 CSV
+按速度排序并输出 CSV
     ↓
-同步 DNS、Cloudflare KV 和优良库（按配置启用）
+同步 DNS、KV 和优良库（按配置启用）
 ~~~
 
-## 快速开始
+程序写入 KV 的时间统一使用北京时间（UTC+8）。
 
-### 下载发行版
+---
 
-1. 从 [Releases](https://github.com/Lyxot/CloudflareSpeedTestDNS/releases/latest) 下载对应系统和架构的压缩包。
-2. 解压到单独目录。
-3. 将 conf/config.example.toml 复制为同目录下的 config.toml。
-4. 按需修改配置，并确认输入文件路径正确。
-5. 执行程序。
+<a id="install"></a>
 
-Windows PowerShell：
+## 3. 安装与运行
 
-~~~powershell
-Copy-Item ./conf/config.example.toml ./config.toml
-./cfstd-windows-x86_64.exe -c ./config.toml
-~~~
+### 3.1 下载发行版
 
-Linux/macOS：
+1. 打开 [Releases](https://github.com/Lost-su/CFSpeedSync/releases)。
+2. 下载与系统和架构对应的压缩包。
+3. 解压后，将 <code>config.example.toml</code> 复制为 <code>config.toml</code>。
+4. 修改配置并运行程序。
 
-~~~bash
-cp conf/config.example.toml config.toml
-chmod +x ./cfstd-linux-x86_64
-./cfstd-linux-x86_64 -c ./config.toml
-~~~
+常见文件名：
 
-文件名需要按实际下载的架构替换，例如 cfstd-macos-aarch64 或 cfstd-linux-armv7。如果当前目录存在 config.toml，可以省略 -c。没有配置文件时程序会使用内置默认值，但仍需要默认的 ip.txt。
+| 系统 | 架构 | 文件名 |
+| --- | --- | --- |
+| Windows | x64 | <code>cfstd-windows-x86_64.exe</code> |
+| Windows | ARM64 | <code>cfstd-windows-arm64.exe</code> |
+| Linux | x64 | <code>cfstd-linux-x86_64</code> |
+| Linux | ARM64 | <code>cfstd-linux-aarch64</code> |
+| macOS | Intel | <code>cfstd-macos-x86_64</code> |
+| macOS | Apple Silicon | <code>cfstd-macos-aarch64</code> |
 
-### 从源码运行
+如果当前目录存在 <code>config.toml</code>，可以省略 <code>-c</code>。没有配置文件时程序会使用内置默认值，但仍需要默认的 <code>ip.txt</code>。
+
+### 3.2 从源码运行
 
 要求 Go 1.24 或更高版本：
 
 ~~~bash
-git clone https://github.com/Lyxot/CloudflareSpeedTestDNS.git
-cd CloudflareSpeedTestDNS
+git clone https://github.com/Lost-su/CFSpeedSync.git
+cd CFSpeedSync
 cp conf/config.example.toml config.toml
 go run . -c config.toml
 ~~~
@@ -80,26 +218,22 @@ go run . -c config.toml
 Windows PowerShell：
 
 ~~~powershell
-git clone https://github.com/Lyxot/CloudflareSpeedTestDNS.git
-Set-Location ./CloudflareSpeedTestDNS
+git clone https://github.com/Lost-su/CFSpeedSync.git
+Set-Location ./CFSpeedSync
 Copy-Item ./conf/config.example.toml ./config.toml
 go run . -c ./config.toml
 ~~~
 
-首次运行建议保持所有 DNS、KV 和 Cron 配置为 enable = false，确认测速结果正常后再逐项启用远程同步。
+### 3.3 命令行参数
 
-## 命令行参数
-
-~~~text
--c <path>       指定 TOML 配置文件；不指定时读取当前目录的 config.toml
--debug          输出更多调试日志
--pgo            开启 CPU profile，生成 cpu.pprof
--v              打印版本、构建信息和 Go 版本
--u              检查 GitHub Releases 是否有新版本
--h              显示帮助
-~~~
-
-示例：
+| 参数 | 说明 |
+| --- | --- |
+| <code>-c &lt;path&gt;</code> | 指定 TOML 配置文件 |
+| <code>-debug</code> | 输出更多调试日志 |
+| <code>-pgo</code> | 开启 CPU profile，生成 <code>cpu.pprof</code> |
+| <code>-v</code> | 打印版本、构建信息和 Go 版本 |
+| <code>-u</code> | 检查 GitHub Releases 是否有新版本 |
+| <code>-h</code> | 显示帮助 |
 
 ~~~bash
 ./cfstd -c config.toml -debug
@@ -107,25 +241,32 @@ go run . -c ./config.toml
 ./cfstd -u
 ~~~
 
-## 配置教程
+---
 
-完整示例见 [conf/config.example.toml](conf/config.example.toml)，环境变量说明见 [conf/env.md](conf/env.md)。配置加载顺序是：
+<a id="configuration"></a>
 
-1. 读取 -c 指定的文件；未指定时尝试读取 config.toml。
-2. 读取 CFSTD_* 环境变量，并覆盖 TOML 中的同名配置。
-3. 应用程序默认值和运行参数。
+## 4. 核心配置
 
-### 输入 IP
+完整示例见 [conf/config.example.toml](conf/config.example.toml)，环境变量列表见 [conf/env.md](conf/env.md)。
 
-#### 文件或 URL
+配置加载顺序：
+
+1. 读取 <code>-c</code> 指定的文件；未指定时读取当前目录的 <code>config.toml</code>。
+2. 使用 <code>CFSTD_*</code> 环境变量覆盖 TOML 配置。
+3. 应用命令行参数，例如 <code>-debug</code>。
+
+### 4.1 IP 数据来源
+
+#### 本地文件或远程 URL
 
 ~~~toml
 ip_file = "ip.txt"
-# 也可以使用远程 URL
+
+# 也可以直接使用 URL
 # ip_file = "https://example.com/ipv4.txt"
 ~~~
 
-每行可以写一个 IP 或 CIDR：
+输入文件每行填写一个 IP 或 CIDR：
 
 ~~~text
 104.16.0.0/13
@@ -133,30 +274,32 @@ ip_file = "ip.txt"
 1.1.1.1
 ~~~
 
-程序自动识别本地路径和 http/https URL。默认情况下，每个 IPv4 /24 网段随机抽取地址；设置 test_all = true 才会遍历网段中的地址。IPv6 网段生成随机地址，单个 /128 地址直接测试。
+默认情况下，每个 IPv4 <code>/24</code> 网段随机抽取地址；设置 <code>test_all = true</code> 后才会遍历网段地址。IPv6 网段会生成随机地址，单个 <code>/128</code> 地址直接测试。
 
-#### 内联 IP
+#### 直接填写 IP
 
 ~~~toml
 ip_text = "1.1.1.1,1.0.0.1,2606:4700:4700::1111"
 ~~~
 
-ip_text 非空时优先于文件配置，多个地址或网段使用英文逗号分隔。
+多个地址或网段使用英文逗号分隔。<code>ip_text</code> 非空时优先于文件配置。
 
-#### IPv4/IPv6 分离
+#### IPv4/IPv6 分离测速
 
 ~~~toml
 ipv4_file = "ip.txt"
 ipv6_file = "ipv6.txt"
 ~~~
 
-- 只填写 ipv4_file：只测速 IPv4。
-- 只填写 ipv6_file：只测速 IPv6。
-- 同时填写两者：分别测速，并输出 result_ipv4.csv、result_ipv6.csv。
-- 填写任意一个 ipv4_file/ipv6_file 后，ip_file 会被忽略。
-- ip_text 优先级最高；设置后不会读取文件。
+| 配置方式 | 行为 |
+| --- | --- |
+| 只填写 <code>ipv4_file</code> | 只测速 IPv4 |
+| 只填写 <code>ipv6_file</code> | 只测速 IPv6 |
+| 两者都填写 | 分别测速，输出 <code>result_ipv4.csv</code> 和 <code>result_ipv6.csv</code> |
+| 填写任意分离文件 | <code>ip_file</code> 被忽略 |
+| 填写 <code>ip_text</code> | 优先使用内联数据，不读取文件 |
 
-### 延迟测速
+### 4.2 延迟测速
 
 ~~~toml
 routines = 200
@@ -165,14 +308,25 @@ tcp_port = 443
 max_delay = 9999
 min_delay = 0
 max_loss_rate = 1.0
+
 httping = false
 httping_code = 0
 cfcolo = ""
 ~~~
 
-routines 是并发线程数，ping_times 是每个 IP 的探测次数，延迟单位为毫秒，丢包率范围为 0.0~1.0。httping = true 时使用 HTTPing；httping_code = 0 表示接受 200、301、302。cfcolo 可以填写 HKG,NRT,SJC 这类 Cloudflare 机场/地区码。
+| 配置 | 单位/范围 | 说明 |
+| --- | --- | --- |
+| <code>routines</code> | 线程数 | 延迟测速并发数 |
+| <code>ping_times</code> | 次 | 每个 IP 的探测次数 |
+| <code>tcp_port</code> | 端口 | 默认 443 |
+| <code>min_delay</code> | ms | 平均延迟下限 |
+| <code>max_delay</code> | ms | 平均延迟上限 |
+| <code>max_loss_rate</code> | 0.0~1.0 | 允许的最大丢包率 |
+| <code>httping</code> | true/false | true 使用 HTTPing，false 使用 TCPing |
+| <code>httping_code</code> | HTTP 状态码 | 0 表示接受 200、301、302 |
+| <code>cfcolo</code> | 地区码 | 例如 HKG,NRT,SJC |
 
-### 下载测速
+### 4.3 下载测速
 
 ~~~toml
 test_count = 10
@@ -182,9 +336,14 @@ min_speed = 0.0
 disable_download = false
 ~~~
 
-程序先进行延迟/丢包筛选，再对候选 IP 下载测速。test_count 是最终保留数量；设置 min_speed 后，程序会继续尝试候选 IP，直到达到数量或候选用尽。disable_download = true 时只保留延迟测速结果。
+程序先完成延迟和丢包筛选，再对候选 IP 下载测速：
 
-### 输出和重试
+- <code>test_count</code>：最终保留的下载测速结果数量。
+- <code>download_time</code>：单个 IP 的下载测速时间，单位为秒。
+- <code>min_speed</code>：最低下载速度，单位为 MB/s。
+- <code>disable_download = true</code>：跳过下载测速，只保留延迟结果。
+
+### 4.4 输出与重试
 
 ~~~toml
 print_num = 10
@@ -195,15 +354,80 @@ output = "result.csv"
 log_file = ""
 ~~~
 
-print_num = 0 表示不在终端显示结果；dns_num 独立于显示数量；min_num > 0 时，符合条件的结果少于该数量会触发重试；output 为空字符串时不生成 CSV；log_file 非空时追加写入日志。
+| 配置 | 说明 |
+| --- | --- |
+| <code>print_num</code> | 终端显示数量；0 表示不显示 |
+| <code>dns_num</code> | 同步到 DNS 的结果数量，与显示数量独立 |
+| <code>min_num</code> | 少于此数量时判定本轮结果不足；0 表示不限制 |
+| <code>max_attempts</code> | 结果不足时的最大尝试次数 |
+| <code>output</code> | CSV 输出路径；空字符串表示不输出 |
+| <code>log_file</code> | 日志文件路径；空字符串表示不写文件 |
 
-CSV 列为：IP 地址、已发送、已接收、丢包率、平均延迟、下载速度(MB/s)、地区码。结果按下载速度从高到低排序。
+CSV 包含 IP 地址、发包数、收包数、丢包率、平均延迟、下载速度和地区码。
 
-## DNS 自动同步
+---
 
-程序会把本轮结果中排名靠前的 dns_num 个地址同步到已启用的 DNS 服务。IPv4 使用 A 记录，IPv6 使用 AAAA 记录；同一记录名下不在目标列表中的旧记录会被清理。
+<a id="worker"></a>
 
-### 阿里云 DNS
+## 5. Cloudflare KV 与 Worker
+
+### 5.1 KV key 结构
+
+配置域名和子域名：
+
+~~~toml
+[cfkv]
+domain = "example.com"
+subdomain = "cf"
+~~~
+
+程序会写入：
+
+~~~text
+cf.example.com:ipv4
+cf.example.com:ipv4time
+cf.example.com:ipv6
+cf.example.com:ipv6time
+cf.example.com:excellent_ipv4
+cf.example.com:excellent_ipv6
+~~~
+
+不同的 <code>domain/subdomain</code> 会形成不同线路。Worker 会自动发现这些前缀，并在页面中提供线路切换。
+
+### 5.2 Worker 版本
+
+| 文件 | 语法 | 用途 |
+| --- | --- | --- |
+| [worker_atlas.js](worker_atlas.js) | Modules | 推荐，功能最完整，支持管理操作 |
+| [worker_modern.js](worker_modern.js) | Modules | 现代卡片式页面 |
+| [worker_new.js](worker_new.js) | Service Worker | 简洁深色页面 |
+| [worker.js](worker.js) | Service Worker | 经典表格页面 |
+
+Modules 版本需要将 KV 绑定为 <code>KV_NAMESPACE</code>。Service Worker 版本还需要按文件顶部说明配置页面参数。
+
+### 5.3 Atlas 管理功能
+
+基础展示不需要下面的变量。只有需要在页面中修改 Cloudflare DNS，或者手动把节点加入优良库时才配置：
+
+| 变量 | 类型 | 说明 |
+| --- | --- | --- |
+| <code>ADMIN_TOKEN</code> | Secret | 页面管理操作的管理员令牌 |
+| <code>CF_API_TOKEN</code> | Secret | 具有目标 Zone DNS 编辑权限的 Token |
+| <code>CF_ZONE_ID</code> | Variable | 默认 Cloudflare Zone ID |
+| <code>EXCELLENT_POOL_MAX_SIZE</code> | Variable | 手动加入优良库的最大条数，默认 100 |
+
+不要将 Token 直接写入 Worker 源码。
+
+---
+
+<a id="dns"></a>
+
+## 6. DNS 自动同步
+
+程序会将排名靠前的 <code>dns_num</code> 个地址同步到已启用的 DNS 服务。IPv4 使用 A 记录，IPv6 使用 AAAA 记录。
+
+<details>
+<summary><strong>阿里云 DNS 配置</strong></summary>
 
 ~~~toml
 [alidns]
@@ -215,9 +439,12 @@ subdomain = "cf"
 ttl = 600
 ~~~
 
-最终记录名为 cf.example.com。建议在 RAM 中创建只管理目标域名 DNS 的子用户和 AccessKey，不要使用主账号密钥。
+最终记录名为 <code>cf.example.com</code>。建议使用只允许管理目标域名 DNS 的 RAM 子用户。
 
-### DNSPod（腾讯云）
+</details>
+
+<details>
+<summary><strong>DNSPod 配置</strong></summary>
 
 ~~~toml
 [dnspod]
@@ -229,9 +456,12 @@ subdomain = "cf"
 ttl = 600
 ~~~
 
-请在腾讯云控制台创建最小权限的 API 密钥，并确认域名已经托管在 DNSPod。
+请确认域名已托管在 DNSPod，并使用最小权限的腾讯云 API 密钥。
 
-### Cloudflare DNS
+</details>
+
+<details>
+<summary><strong>Cloudflare DNS 配置</strong></summary>
 
 ~~~toml
 [cloudflare]
@@ -244,92 +474,19 @@ proxied = false
 ttl = 1
 ~~~
 
-Token 至少需要目标 Zone 的 DNS 编辑权限。ttl = 1 表示自动 TTL。优选 IP 通常建议 proxied = false，避免将边缘 IP 再次代理。
+Token 需要目标 Zone 的 DNS 编辑权限。<code>ttl = 1</code> 表示自动 TTL。优选 IP 通常建议设置 <code>proxied = false</code>。
 
-## Cloudflare Workers KV 和 Worker 页面
+</details>
 
-KV 用来保存测速结果，Worker 用来读取并展示结果。启用 KV 至少需要：
+---
 
-~~~toml
-[cfkv]
-enable = true
-api_token = "具有 Workers KV 写入权限的 Token"
-account_id = "Cloudflare Account ID"
-namespace_id = "KV Namespace ID"
-domain = "example.com"
-subdomain = "cf"
-~~~
+<a id="automation"></a>
 
-当 domain 和 subdomain 都填写时，KV key 使用以下前缀：
+## 7. 优良库与定时监控
 
-~~~text
-cf.example.com:ipv4
-cf.example.com:ipv4time
-cf.example.com:ipv6
-cf.example.com:ipv6time
-cf.example.com:excellent_ipv4
-cf.example.com:excellent_ipv6
-~~~
+### 7.1 优良库
 
-不填写域名时使用无前缀 key：ipv4、ipv4time、ipv6、ipv6time。多个站点使用不同的 domain/subdomain 后，Worker 会自动发现线路并提供切换。
-
-### 创建 KV
-
-1. 在 Cloudflare Dashboard 的 Workers & Pages -> KV 创建 Namespace，记录 Namespace ID。
-2. 在 My Profile -> API Tokens 创建 Token，授予目标 Account 的 Workers KV 读写权限。
-3. 将 Account ID、Namespace ID 和 Token 写入 config.toml。
-4. 运行一次测速，确认 KV 中出现 ipv4 或带前缀的 key。
-
-### 部署 Atlas Worker
-
-worker_atlas.js 使用 Modules 语法，支持 IPv4/IPv6 切换、线路切换、最新结果和优良库切换、搜索排序、复制 IP、/api/nodes JSON 接口、/healthz 健康检查，以及可选的管理员 DNS/优良库操作。
-
-1. 创建 Cloudflare Worker，选择 Modules 模式。
-2. 复制 [worker_atlas.js](worker_atlas.js) 的完整内容并部署。
-3. 在 Settings -> Variables and Secrets -> KV bindings 中绑定 KV，变量名必须为 KV_NAMESPACE。
-4. 如需页面管理按钮，增加以下变量或 Secrets：
-
-   - ADMIN_TOKEN：页面管理操作使用的长随机令牌。
-   - CF_API_TOKEN：修改 Cloudflare DNS 的 Token。
-   - CF_ZONE_ID：默认 Zone ID。
-   - DNS_RECORDS：可选的线路到 DNS 记录映射 JSON。
-   - EXCELLENT_POOL_MAX_SIZE：可选，手动加入优良库的最大条数，默认 100。
-
-5. 访问 Worker 域名、/healthz 和 /api/nodes 验证部署。
-
-DNS_RECORDS 示例：
-
-~~~json
-{
-  "cf.example.com": {
-    "record": "cf.example.com",
-    "zone_id": "your_zone_id",
-    "proxied": false,
-    "ttl": 60
-  },
-  "default": {
-    "record": "cf.example.com",
-    "zone_id": "your_zone_id"
-  }
-}
-~~~
-
-key 必须对应 KV key 中冒号前的线路前缀，例如 cf.example.com:ipv4 对应 cf.example.com；没有前缀时使用 default。不要把 Token 写进 Worker 源码，应该配置为 Secret。
-
-### Worker 版本
-
-| 文件 | 语法 | 说明 |
-| --- | --- | --- |
-| [worker_atlas.js](worker_atlas.js) | Modules | 推荐，功能最完整，带管理操作 |
-| [worker_modern.js](worker_modern.js) | Modules | 现代卡片式页面 |
-| [worker_new.js](worker_new.js) | Service Worker | 简洁深色页面 |
-| [worker.js](worker.js) | Service Worker | 经典表格页面 |
-
-Modules 版本都需要绑定名为 KV_NAMESPACE 的 KV。Service Worker 版本还要按文件顶部说明配置域名和检查间隔。
-
-## 优良库
-
-优良库依赖 cfkv，将符合条件的测速结果写入 KV，下次测速时复用：
+优良库依赖 <code>[cfkv]</code>。程序会把符合标准的节点保存到 KV，后续测速时优先复用：
 
 ~~~toml
 [excellent_pool]
@@ -342,13 +499,15 @@ max_size = 100
 auto_remove_slow = true
 ~~~
 
-- priority：优先测速优良库，结果不足时用普通 IP 段补充。
-- only：只测速优良库，不补充普通 IP。
-- mixed：优良库和普通 IP 段合并测速，优良库 IP 排在前面。
+| 模式 | 行为 |
+| --- | --- |
+| <code>priority</code> | 优先测速优良库，结果不足时使用普通 IP 段补充 |
+| <code>only</code> | 只测速优良库，不使用普通 IP 段 |
+| <code>mixed</code> | 优良库和普通 IP 段合并测速 |
 
-入库必须同时满足速度、延迟和丢包率。auto_remove_slow = true 时，不再达标的旧 IP 会被移除；IPv4 和 IPv6 优良库分别计数。
+节点必须同时满足速度、延迟和丢包率条件。开启 <code>auto_remove_slow</code> 后，不再达标的旧节点会被移除。
 
-## 定时监控
+### 7.2 定时监控
 
 ~~~toml
 [cron]
@@ -359,24 +518,22 @@ check_interval = 30
 test_interval = 24
 ~~~
 
-启用后程序启动时先完整测速；之后每 check_interval 分钟检查当前 IP，延迟或丢包超阈值时立即重测并同步；每 test_interval 小时无条件完整刷新一次。Cron 模式是前台常驻进程，适合 systemd、Docker 或 Windows 任务计划。
+启用后：
 
-## Docker
+1. 程序启动时执行一次完整测速。
+2. 每 <code>check_interval</code> 分钟检查当前 IP。
+3. 延迟或丢包超过阈值时立即重新测速并同步。
+4. 每 <code>test_interval</code> 小时无条件完整刷新一次。
 
-仓库提供 Dockerfile 和 docker-compose.yml，Compose 默认使用 lyxot/cfstd:latest：
+Cron 模式是前台常驻进程，适合配合 systemd、Docker 或 Windows 任务计划使用。
 
-~~~bash
-docker compose up -d
-docker compose logs -f cfstd
-~~~
+---
 
-编辑 Compose 中的 CFSTD_* 环境变量即可配置。生产环境建议固定镜像版本、使用 .env 或 Docker Secret 保存密钥，并挂载持久化目录保存配置、输入文件、CSV 和日志。
+## 8. 环境变量与源码编译
 
-从源码构建镜像时，Dockerfile 要求构建上下文中存在 release-assets，且其中包含各架构产物和 config.example.toml；仅执行 docker build . 不会自动生成这些文件。
+### 8.1 环境变量
 
-## 环境变量
-
-所有 TOML 字段都可以转换为 CFSTD_ 前缀的大写蛇形名称：
+TOML 字段可以转换为 <code>CFSTD_</code> 前缀的大写蛇形环境变量：
 
 ~~~bash
 CFSTD_TEST_COUNT=20
@@ -386,75 +543,92 @@ CFSTD_CFKV_API_TOKEN=...
 CFSTD_CRON_ENABLE=true
 ~~~
 
-嵌套字段使用下划线连接，例如 cloudflare.api_token 对应 CFSTD_CLOUDFLARE_API_TOKEN，excellent_pool.max_size 对应 CFSTD_EXCELLENT_POOL_MAX_SIZE。完整列表见 [conf/env.md](conf/env.md)。
+嵌套字段使用下划线连接：
 
-## 从源码编译
+| TOML 配置 | 环境变量 |
+| --- | --- |
+| <code>cloudflare.api_token</code> | <code>CFSTD_CLOUDFLARE_API_TOKEN</code> |
+| <code>cfkv.namespace_id</code> | <code>CFSTD_CFKV_NAMESPACE_ID</code> |
+| <code>excellent_pool.max_size</code> | <code>CFSTD_EXCELLENT_POOL_MAX_SIZE</code> |
+| <code>cron.check_interval</code> | <code>CFSTD_CRON_CHECK_INTERVAL</code> |
 
-当前平台：
+完整列表见 [conf/env.md](conf/env.md)。
+
+### 8.2 编译当前平台
 
 ~~~bash
 go build -ldflags "-s -w" -o cfstd .
 ~~~
 
-Windows 编译全部平台：
+### 8.3 Windows 编译全部平台
 
 ~~~powershell
 powershell -ExecutionPolicy Bypass -File ./build.ps1
 ~~~
 
-产物位于 dist/，包括 Windows、Linux、macOS、ARM、MIPS、RISC-V 和 LoongArch 架构。构建脚本设置 CGO_ENABLED=0，生成不依赖本机 C 运行库的 Go 程序。
+产物位于 <code>dist/</code>，构建脚本使用 <code>CGO_ENABLED=0</code>。
 
-## 故障排查
+---
 
-### 找不到配置或输入文件
+<a id="troubleshooting"></a>
 
-确认程序当前工作目录，以及 -c、ip_file、ipv4_file、ipv6_file 使用的路径。相对路径相对于进程启动目录，而不是可执行文件目录。
+## 9. 故障排查
 
-### 结果数量为零
+| 问题 | 检查方法 |
+| --- | --- |
+| 找不到配置文件 | 检查当前工作目录和 <code>-c</code> 路径 |
+| 找不到 IP 文件 | 检查 <code>ip_file</code>、<code>ipv4_file</code>、<code>ipv6_file</code> 的相对路径 |
+| 测速结果为零 | 放宽 <code>max_delay</code>、<code>max_loss_rate</code> 和 <code>min_speed</code> |
+| IPv6 没有结果 | 确认运行环境具备可用的公网 IPv6 出口 |
+| KV 没有数据 | 检查 Token 权限、Account ID、Namespace ID 和运行日志 |
+| Worker 页面为空 | 确认 Worker 和本地程序使用同一个 KV Namespace |
+| Missing KV binding | KV 绑定名称必须是 <code>KV_NAMESPACE</code>，绑定后重新部署 |
+| DNS 没有更新 | 检查服务是否启用、凭证权限、域名、Zone ID 和 <code>dns_num</code> |
+| 所有 IP 延迟相同 | 关闭透明代理、VPN 或路由器代理后重新测速 |
 
-检查输入文件和 CIDR 是否合法，机器是否能访问目标端口/测速 URL，max_delay、max_loss_rate、min_speed 是否过于严格，以及 IPv6 是否真的有公网出口。调试运行：
+调试运行：
 
 ~~~bash
 ./cfstd -c config.toml -debug
 ~~~
 
-### DNS 没有更新
+Worker 接口排查：
 
-确认对应区块 enable = true、凭证权限正确、域名和 Zone ID 正确、dns_num > 0，并且本轮结果中存在对应 IP 版本。程序会在日志中输出具体的 API 错误。
+~~~text
+https://你的-worker.workers.dev/healthz
+https://你的-worker.workers.dev/api/nodes
+~~~
 
-### KV 页面为空
+---
 
-确认程序已成功写入 KV，Worker 绑定变量名严格为 KV_NAMESPACE，并检查 Worker 与 KV 属于同一个 Account。先访问 /api/nodes，接口错误通常比页面更明确。
+## 10. 安全建议
 
-### 延迟异常低或所有 IP 结果相同
+- 不要将 Cloudflare、阿里云或 DNSPod 密钥提交到 Git。
+- API Token 应使用最小权限，并限制到实际使用的 Account 或 Zone。
+- Worker 的 <code>ADMIN_TOKEN</code> 和 <code>CF_API_TOKEN</code> 应配置为 Secret。
+- 不要把任何 API Token 直接写入 Worker JavaScript 文件。
+- 公开日志前确认其中不包含敏感信息。
 
-关闭透明代理、VPN 和路由器代理功能后重测。代理可能让请求并未真正连接到待测 IP。
+---
 
-## 安全建议
-
-- 不要把 Cloudflare、阿里云或 DNSPod 密钥提交到 Git。
-- API Token 使用最小权限和最小 Zone 范围。
-- Worker 的 ADMIN_TOKEN、CF_API_TOKEN 使用 Secrets，不要写入 JavaScript 源码。
-- DNS_RECORDS 不应包含任何 API Token。
-- 公开日志前确认没有泄露敏感信息。
-
-## 相关文件
+## 11. 项目文件
 
 | 文件 | 说明 |
 | --- | --- |
 | [conf/config.example.toml](conf/config.example.toml) | 完整 TOML 配置示例 |
 | [conf/env.md](conf/env.md) | 环境变量列表 |
-| [ip.txt](ip.txt) | 默认 IP/CIDR 输入文件 |
-| [ipv6.txt](ipv6.txt) | IPv6 输入示例 |
-| [worker_atlas.js](worker_atlas.js) | 推荐 Worker 页面 |
+| [ip.txt](ip.txt) | 默认 IPv4/IP 段输入文件 |
+| [ipv6.txt](ipv6.txt) | IPv6 输入文件 |
+| [worker_atlas.js](worker_atlas.js) | 推荐的 Worker 页面 |
+| [worker_modern.js](worker_modern.js) | 现代版 Worker 页面 |
 | [docker-compose.yml](docker-compose.yml) | Docker Compose 示例 |
 | [build.ps1](build.ps1) | 多平台交叉编译脚本 |
-| [RELEASE_NOTES.md](RELEASE_NOTES.md) | 发布版本说明 |
+| [RELEASE_NOTES.md](RELEASE_NOTES.md) | 发布说明 |
 
 ## 致谢
 
-- [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)：核心测速思路和部分实现基础。
-- [IonRh/Cloudflare-BestIP](https://github.com/IonRh/Cloudflare-BestIP)：项目界面和功能设计参考。
+- [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)：核心测速思路和实现基础。
+- [IonRh/Cloudflare-BestIP](https://github.com/IonRh/Cloudflare-BestIP)：项目功能和界面设计参考。
 
 ## 开源协议
 
