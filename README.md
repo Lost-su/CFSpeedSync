@@ -8,7 +8,7 @@
 
 CFSpeedSync 基于 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 开发。本地程序负责测速和同步，Cloudflare Worker 负责从 KV 读取数据并展示页面。
 
-**快速导航：** [五分钟部署](#quick-deploy) · [安装运行](#install) · [核心配置](#configuration) · [KV 与 Worker](#worker) · [DNS 同步](#dns) · [优良库与定时监控](#automation) · [故障排查](#troubleshooting)
+**快速导航：** [五分钟部署](#quick-deploy) · [安装运行](#install) · [核心配置](#configuration) · [KV 与 Worker](#worker) · [DNS 同步](#dns) · [优良库与定时监控](#automation) · [Docker 部署](#docker) · [故障排查](#troubleshooting)
 
 ---
 
@@ -499,13 +499,33 @@ max_size = 100
 auto_remove_slow = true
 ~~~
 
+| 配置 | 说明 |
+| --- | --- |
+| <code>use_mode</code> | 使用模式（见下表） |
+| <code>min_speed</code> | 入库最低速度（MB/s） |
+| <code>max_delay</code> | 入库最大延迟（ms） |
+| <code>max_loss_rate</code> | 入库最大丢包率（0.0~1.0） |
+| <code>max_size</code> | 单域名单版本最大容量 |
+| <code>auto_remove_slow</code> | 自动移除衰减节点 |
+
+**使用模式：**
+
 | 模式 | 行为 |
 | --- | --- |
 | <code>priority</code> | 优先测速优良库，结果不足时使用普通 IP 段补充 |
 | <code>only</code> | 只测速优良库，不使用普通 IP 段 |
 | <code>mixed</code> | 优良库和普通 IP 段合并测速 |
 
-节点必须同时满足速度、延迟和丢包率条件。开启 <code>auto_remove_slow</code> 后，不再达标的旧节点会被移除。
+**入库与更新策略：**
+
+- **新 IP**：必须同时满足速度、延迟和丢包率条件才能入库
+- **已存在的 IP**：每次测速无条件更新数据
+  - 达标：数据更新，衰减计数清零
+  - 不达标：数据更新，衰减计数 +1
+  - 连续 2 次不达标：自动移除（需开启 <code>auto_remove_slow</code>）
+- **库满替换**：新 IP 速度超过库中最慢且最老的 IP 时替换
+
+这种策略兼顾实时性和容错性：库中数据始终是最新测速结果，同时容忍偶发网络抖动。
 
 ### 7.2 定时监控
 
@@ -529,9 +549,171 @@ Cron 模式是前台常驻进程，适合配合 systemd、Docker 或 Windows 任
 
 ---
 
-## 8. 环境变量与源码编译
+<a id="docker"></a>
 
-### 8.1 环境变量
+## 8. Docker 部署
+
+镜像地址：`ghcr.io/lost-su/cfspeedsync:latest`
+
+镜像已经包含 Linux 预编译程序、示例配置、IPv4 列表和 IPv6 列表。普通用户不需要下载源码、安装 Go 或在本地执行 `docker build`。
+
+### 8.1 使用 Compose 直接拉取
+
+在项目目录执行：
+
+~~~bash
+docker compose pull
+docker compose up -d
+docker compose logs -f cfspeedsync
+~~~
+
+Compose 会直接拉取发布好的镜像。首次启动时，镜像会自动在 `docker-data/` 中生成：
+
+| 宿主机文件 | 容器内路径 | 用途 |
+| --- | --- | --- |
+| `docker-data/config.toml` | `/config/config.toml` | 主配置文件 |
+| `docker-data/ip.txt` | `/config/ip.txt` | 默认 IPv4/IP 段列表 |
+| `docker-data/ipv6.txt` | `/config/ipv6.txt` | IPv6 列表 |
+| `docker-data/result.csv` | `/config/result.csv` | 测速后生成的 CSV |
+
+首次启动后编辑 `docker-data/config.toml`，填写 KV、DNS 等配置，再重启容器：
+
+~~~toml
+[cfkv]
+enable = true
+api_token = "你的 KV API Token"
+account_id = "你的 Account ID"
+namespace_id = "你的 KV Namespace ID"
+domain = "example.com"
+subdomain = "cf"
+~~~
+
+~~~bash
+docker compose restart
+~~~
+
+镜像更新时只需重新拉取：
+
+~~~bash
+docker compose pull
+docker compose up -d
+~~~
+
+更新镜像不会覆盖 `docker-data/` 中已经修改的配置和 IP 文件。
+
+### 8.2 不下载仓库，直接使用 docker run
+
+Linux/macOS：
+
+~~~bash
+mkdir -p docker-data
+docker pull ghcr.io/lost-su/cfspeedsync:latest
+docker run -d \
+  --name cfspeedsync \
+  --restart unless-stopped \
+  -e TZ=Asia/Shanghai \
+  -e CFSTD_CRON_ENABLE=true \
+  -v "$(pwd)/docker-data:/config" \
+  ghcr.io/lost-su/cfspeedsync:latest
+~~~
+
+Windows PowerShell：
+
+~~~powershell
+New-Item -ItemType Directory -Force ./docker-data | Out-Null
+docker pull ghcr.io/lost-su/cfspeedsync:latest
+docker run -d `
+  --name cfspeedsync `
+  --restart unless-stopped `
+  -e TZ=Asia/Shanghai `
+  -e CFSTD_CRON_ENABLE=true `
+  -v "${PWD}/docker-data:/config" `
+  ghcr.io/lost-su/cfspeedsync:latest
+~~~
+
+### 8.3 一次性执行测速
+
+如果只想执行一轮测速，不让容器常驻：
+
+Linux/macOS：
+
+~~~bash
+CFSTD_CRON_ENABLE=false docker compose run --rm cfspeedsync
+~~~
+
+Windows PowerShell：
+
+~~~powershell
+$env:CFSTD_CRON_ENABLE = "false"
+docker compose run --rm cfspeedsync
+Remove-Item Env:CFSTD_CRON_ENABLE
+~~~
+
+一次性运行会把 CSV、日志和 KV 同步结果写入 `docker-data/` 或远程服务。
+
+### 8.4 停止和删除容器
+
+~~~bash
+docker compose restart
+docker compose down
+~~~
+
+`docker compose down` 不会删除 `docker-data/`。可以通过项目根目录的 `.env` 覆盖镜像版本、容器名、数据目录和 Cron 开关：
+
+~~~bash
+CFSPEEDSYNC_IMAGE=ghcr.io/lost-su/cfspeedsync:v1.0.0
+CFSPEEDSYNC_CONTAINER_NAME=cfspeedsync-prod
+CFSPEEDSYNC_DATA_DIR=./data
+CFSTD_CRON_ENABLE=true
+~~~
+
+`CFSPEEDSYNC_*` 是 Compose 部署变量；`CFSTD_*` 是程序继承的配置环境变量前缀，不是项目名或镜像名。不要将 API Token 写入公开仓库中的 Compose 文件或 `.env`。
+
+### 8.5 发布预构建镜像（项目维护者）
+
+仓库中的 [docker-publish.yml](.github/workflows/docker-publish.yml) 会完成以下工作：
+
+1. 将当前源码预编译为 `amd64`、`386`、`arm64`、`arm/v7` 和 `riscv64` Linux 程序。
+2. 将程序、`config.example.toml`、`ip.txt` 和 `ipv6.txt` 打包进镜像。
+3. 推送多架构镜像到 `ghcr.io/lost-su/cfspeedsync`。
+
+发布新版本时创建并推送版本标签：
+
+~~~bash
+git tag v1.0.0
+git push origin v1.0.0
+~~~
+
+GitHub Actions 会自动发布以下标签：
+
+~~~text
+ghcr.io/lost-su/cfspeedsync:latest
+ghcr.io/lost-su/cfspeedsync:v1.0.0
+ghcr.io/lost-su/cfspeedsync:sha-xxxxxxx
+~~~
+
+第一次发布后，在 GitHub 个人主页的 **Packages** 中打开 `cfspeedsync`，进入 **Package settings**，将可见性改为 **Public**。否则其他用户拉取镜像时需要登录 GHCR。
+
+也可以在 GitHub 仓库的 **Actions > Publish Docker image > Run workflow** 手动发布。Dockerfile 只打包 `dist/` 中已经编译好的程序，不会在 Docker 构建阶段编译 Go 源码。
+
+### 8.6 Docker 常见问题
+
+| 现象 | 处理方式 |
+| --- | --- |
+| 无法拉取镜像 | 确认 GHCR Package 已设为 Public，镜像地址和标签拼写正确 |
+| 容器反复重启 | 查看 `docker compose logs cfspeedsync`；一次性模式请使用 `docker compose run --rm cfspeedsync` |
+| 找不到 `ip.txt` | 确认文件位于 `docker-data/ip.txt`，且配置中的 `ip_file` 使用 `ip.txt` |
+| 修改配置不生效 | 修改宿主机文件后执行 `docker compose restart` |
+| CSV 找不到 | 结果位于 `docker-data/result.csv`；确认 `output` 没有设置为空 |
+| KV 没有数据 | 检查 `[cfkv]`、Token 权限、Account ID 和 Namespace ID |
+| 权限错误 | 确保 Docker 进程可以读写 `docker-data/` |
+| 拉取到旧版本 | 执行 `docker compose pull && docker compose up -d`，或在 `.env` 中指定明确版本标签 |
+
+---
+
+## 9. 环境变量与源码编译
+
+### 9.1 环境变量
 
 TOML 字段可以转换为 <code>CFSTD_</code> 前缀的大写蛇形环境变量：
 
@@ -554,13 +736,13 @@ CFSTD_CRON_ENABLE=true
 
 完整列表见 [conf/env.md](conf/env.md)。
 
-### 8.2 编译当前平台
+### 9.2 编译当前平台
 
 ~~~bash
 go build -ldflags "-s -w" -o cfstd .
 ~~~
 
-### 8.3 Windows 编译全部平台
+### 9.3 Windows 编译全部平台
 
 ~~~powershell
 powershell -ExecutionPolicy Bypass -File ./build.ps1
@@ -572,7 +754,7 @@ powershell -ExecutionPolicy Bypass -File ./build.ps1
 
 <a id="troubleshooting"></a>
 
-## 9. 故障排查
+## 10. 故障排查
 
 | 问题 | 检查方法 |
 | --- | --- |
@@ -601,7 +783,7 @@ https://你的-worker.workers.dev/api/nodes
 
 ---
 
-## 10. 安全建议
+## 11. 安全建议
 
 - 不要将 Cloudflare、阿里云或 DNSPod 密钥提交到 Git。
 - API Token 应使用最小权限，并限制到实际使用的 Account 或 Zone。
@@ -611,7 +793,7 @@ https://你的-worker.workers.dev/api/nodes
 
 ---
 
-## 11. 项目文件
+## 12. 项目文件
 
 | 文件 | 说明 |
 | --- | --- |
@@ -619,8 +801,10 @@ https://你的-worker.workers.dev/api/nodes
 | [conf/env.md](conf/env.md) | 环境变量列表 |
 | [ip.txt](ip.txt) | 默认 IPv4/IP 段输入文件 |
 | [ipv6.txt](ipv6.txt) | IPv6 输入文件 |
-| [worker_atlas.js](worker_atlas.js) | 推荐的 Worker 页面 |
-| [worker_modern.js](worker_modern.js) | 现代版 Worker 页面 |
+| [worker_atlas.js](worker_atlas.js) | 推荐的 Worker 页面（Modules 语法，功能完整） |
+| [worker_modern.js](worker_modern.js) | 现代卡片式 Worker 页面（Modules 语法） |
+| [worker_new.js](worker_new.js) | 简洁深色 Worker 页面（Service Worker 语法） |
+| [worker.js](worker.js) | 经典表格 Worker 页面（Service Worker 语法） |
 | [docker-compose.yml](docker-compose.yml) | Docker Compose 示例 |
 | [build.ps1](build.ps1) | 多平台交叉编译脚本 |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | 发布说明 |

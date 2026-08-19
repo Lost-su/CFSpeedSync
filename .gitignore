@@ -5,3 +5,6 @@ Releases
 cfst*
 CloudflareSpeedTest*
 .DS_Store
+.env
+docker-data/
+.gocache/

@@ -21,6 +21,7 @@ type ExcellentEntry struct {
 	Received  int     `json:"received"`
 	Colo      string  `json:"colo"`
 	AddedTime string  `json:"added_time"` // 北京时间
+	SlowCount int     `json:"slow_count"` // 连续不达标次数，≥2时移除
 }
 
 // excellentPoolConfig 优良库配置（由 conf 包在 ApplyConfig 中填充）
@@ -102,24 +103,55 @@ func UpdateExcellentPool(ipVersion string, testResults []utils.IPData) error {
 	beijingLoc := time.FixedZone("CST", 8*3600)
 	now := time.Now().In(beijingLoc).Format("2006-01-02 15:04:05")
 
-	// 1. 移除衰减IP（如果启用）
+	// 1. 构建本次测速结果的IP集合
+	testResultMap := make(map[string]utils.IPData)
+	for _, r := range testResults {
+		testResultMap[r.IP] = r
+	}
+
+	// 2. 遍历现有库，更新或标记衰减
 	if cfg.AutoRemoveSlow {
-		before := len(current)
 		var kept []ExcellentEntry
 		for _, e := range current {
-			if e.Speed >= cfg.MinSpeed && float64(e.Delay) <= float64(cfg.MaxDelay) && float64(e.LossRate) <= cfg.MaxLossRate {
-				kept = append(kept, e)
+			if r, tested := testResultMap[e.IP]; tested {
+				// 本次测到了这个IP，无条件更新数据
+				if meetsExcellentStandard(r) {
+					// 达标：更新数据，SlowCount清零
+					e.Speed = r.Speed
+					e.Delay = r.Delay
+					e.LossRate = r.LossRate
+					e.Colo = r.Colo
+					e.Packets = r.Packets
+					e.Received = r.Received
+					e.SlowCount = 0
+					kept = append(kept, e)
+				} else {
+					// 不达标：更新数据，SlowCount+1
+					e.Speed = r.Speed
+					e.Delay = r.Delay
+					e.LossRate = r.LossRate
+					e.Colo = r.Colo
+					e.Packets = r.Packets
+					e.Received = r.Received
+					e.SlowCount++
+					if e.SlowCount >= 2 {
+						utils.LogInfo("[优良库] 移除衰减IP: %s (连续%d次不达标，最新: %.2f MB/s, %d ms)",
+							e.IP, e.SlowCount, e.Speed, e.Delay)
+					} else {
+						utils.LogInfo("[优良库] 更新但标记: %s (第%d次不达标，最新: %.2f MB/s, %d ms)",
+							e.IP, e.SlowCount, e.Speed, e.Delay)
+						kept = append(kept, e)
+					}
+				}
 			} else {
-				utils.LogInfo("[优良库] 移除衰减IP: %s (速度: %.2f MB/s, 延迟: %d ms)", e.IP, e.Speed, e.Delay)
+				// 本次没测到这个IP，保留原样
+				kept = append(kept, e)
 			}
 		}
 		current = kept
-		if utils.Debug && before > len(current) {
-			utils.LogDebug("[优良库] 移除衰减IP %d 条", before-len(current))
-		}
 	}
 
-	// 构建现有IP集合，避免重复入库
+	// 3. 构建现有IP集合，避免重复入库
 	existing := make(map[string]struct{}, len(current))
 	for _, e := range current {
 		existing[e.IP] = struct{}{}
@@ -128,28 +160,15 @@ func UpdateExcellentPool(ipVersion string, testResults []utils.IPData) error {
 	utils.LogInfo("[优良库] 正在筛选本次 %d 条%s测速结果 (速度≥%.1f MB/s, 延迟≤%d ms, 丢包率≤%.2f)...",
 		len(testResults), ipVersion, cfg.MinSpeed, cfg.MaxDelay, cfg.MaxLossRate)
 
-	// 2. 遍历本次测速结果，尝试入库
-	added, updated, replaced, skipped := 0, 0, 0, 0
+	// 4. 遍历本次测速结果，处理新IP
+	added, replaced := 0, 0
 	for _, r := range testResults {
-		if !meetsExcellentStandard(r) {
-			skipped++
-			if utils.Debug {
-				utils.LogDebug("[优良库] 不符合标准，跳过: %s (速度: %.2f MB/s, 延迟: %d ms, 丢包: %.2f)",
-					r.IP, r.Speed, r.Delay, r.LossRate)
-			}
+		if _, dup := existing[r.IP]; dup {
+			// 已在库中，前面已处理过，跳过
 			continue
 		}
-		if _, dup := existing[r.IP]; dup {
-			// 已存在则更新数据
-			for i, e := range current {
-				if e.IP == r.IP {
-					current[i].Speed = r.Speed
-					current[i].Delay = r.Delay
-					current[i].LossRate = r.LossRate
-					current[i].Colo = r.Colo
-				}
-			}
-			updated++
+		if !meetsExcellentStandard(r) {
+			// 新IP不达标，不入库
 			continue
 		}
 
@@ -162,6 +181,7 @@ func UpdateExcellentPool(ipVersion string, testResults []utils.IPData) error {
 			Received:  r.Received,
 			Colo:      r.Colo,
 			AddedTime: now,
+			SlowCount: 0,
 		}
 
 		if len(current) < cfg.MaxSize {
@@ -179,21 +199,13 @@ func UpdateExcellentPool(ipVersion string, testResults []utils.IPData) error {
 				current[idx] = newEntry
 				existing[r.IP] = struct{}{}
 				replaced++
-			} else {
-				utils.LogInfo("[优良库] 库已满(%d)且无更慢IP可替换，跳过: %s (%.2f MB/s)", cfg.MaxSize, r.IP, r.Speed)
 			}
 		}
 	}
 
-	qualified := added + updated + replaced
-	if qualified == 0 {
-		utils.LogWarn("[优良库] 本次 %d 条结果均不符合入库标准（速度需≥%.1f MB/s），优良库未变更", len(testResults), cfg.MinSpeed)
-	} else {
-		utils.LogInfo("[优良库] 本次筛选: %d/%d 条符合标准，新增%d 更新%d 替换%d，当前库共 %d 条",
-			qualified, len(testResults), added, updated, replaced, len(current))
-	}
+	utils.LogInfo("[优良库] 本次处理完成：新增%d 替换%d，当前库共 %d 条", added, replaced, len(current))
 
-	// 3. 写回 KV
+	// 5. 写回 KV
 	return saveExcellentPool(ipVersion, current)
 }
 
