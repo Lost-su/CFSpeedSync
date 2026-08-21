@@ -423,45 +423,27 @@ async function getAllData(prefixes) {
     let latestIPv4Time = null;
     let latestIPv6Time = null;
 
-    // 首先获取无前缀的数据
-    const defaultIPv4 = await KV_NAMESPACE.get('ipv4');
-    const defaultIPv6 = await KV_NAMESPACE.get('ipv6');
-    const defaultIPv4Time = await KV_NAMESPACE.get('ipv4time');
-    const defaultIPv6Time = await KV_NAMESPACE.get('ipv6time');
+    // 构建所有需要读取的 key
+    const keys = ['ipv4', 'ipv6', 'ipv4time', 'ipv6time'];
+    const allKeys = [...keys];
+    prefixes.forEach(prefix => {
+      keys.forEach(key => allKeys.push(prefix + ':' + key));
+    });
 
-    if (defaultIPv4) {
-      allIPv4Data.push(defaultIPv4);
-      latestIPv4Time = defaultIPv4Time;
-    }
-    if (defaultIPv6) {
-      allIPv6Data.push(defaultIPv6);
-      latestIPv6Time = defaultIPv6Time;
-    }
+    // 并行读取所有 KV
+    const results = await Promise.all(allKeys.map(key => KV_NAMESPACE.get(key)));
 
-    // 遍历所有前缀，获取数据
-    for (const prefix of prefixes) {
-      const kvPrefix = prefix + ':';
+    // 解析默认keys（前4个）
+    const [defv4, defv6, defv4t, defv6t] = results.slice(0, 4);
+    if (defv4) { allIPv4Data.push(defv4); latestIPv4Time = defv4t; }
+    if (defv6) { allIPv6Data.push(defv6); latestIPv6Time = defv6t; }
 
-      const ipv4 = await KV_NAMESPACE.get(kvPrefix + 'ipv4');
-      const ipv6 = await KV_NAMESPACE.get(kvPrefix + 'ipv6');
-      const ipv4time = await KV_NAMESPACE.get(kvPrefix + 'ipv4time');
-      const ipv6time = await KV_NAMESPACE.get(kvPrefix + 'ipv6time');
-
-      if (ipv4) {
-        allIPv4Data.push(ipv4);
-        // 更新最新时间
-        if (!latestIPv4Time || (ipv4time && ipv4time > latestIPv4Time)) {
-          latestIPv4Time = ipv4time;
-        }
-      }
-
-      if (ipv6) {
-        allIPv6Data.push(ipv6);
-        // 更新最新时间
-        if (!latestIPv6Time || (ipv6time && ipv6time > latestIPv6Time)) {
-          latestIPv6Time = ipv6time;
-        }
-      }
+    // 解析prefix keys（每4个一组）
+    for (let i = 0; i < prefixes.length; i++) {
+      const offset = 4 + i * 4;
+      const [v4, v6, v4t, v6t] = results.slice(offset, offset + 4);
+      if (v4) { allIPv4Data.push(v4); if (!latestIPv4Time || (v4t && v4t > latestIPv4Time)) latestIPv4Time = v4t; }
+      if (v6) { allIPv6Data.push(v6); if (!latestIPv6Time || (v6t && v6t > latestIPv6Time)) latestIPv6Time = v6t; }
     }
 
     // 合并所有数据，用&连接

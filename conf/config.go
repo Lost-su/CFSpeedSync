@@ -26,12 +26,12 @@ var (
 	DnsNum            int
 
 	EnableExcellentPool     bool
-	ExcellentPoolUseMode    string
-	ExcellentPoolMinSpeed   float64
-	ExcellentPoolMaxDelay   int
-	ExcellentPoolMaxLoss    float64
-	ExcellentPoolMaxSize    int
-	ExcellentPoolAutoRemove bool
+	ExcellentPoolUseMode    = "priority"
+	ExcellentPoolMinSpeed   = 20.0
+	ExcellentPoolMaxDelay   = 150
+	ExcellentPoolMaxLoss    = 0.0
+	ExcellentPoolMaxSize    = 100
+	ExcellentPoolAutoRemove = true
 )
 
 // Config 配置文件结构体
@@ -414,4 +414,13 @@ func ApplyConfig(config *Config) {
 		ExcellentPoolMaxSize = config.ExcellentPool.MaxSize
 	}
 	ExcellentPoolAutoRemove = config.ExcellentPool.AutoRemoveSlow
+
+	// 同步到 ddns 包实际使用的优良库配置
+	ddns.ExcellentPoolCfg.Enable = EnableExcellentPool
+	ddns.ExcellentPoolCfg.UseMode = ExcellentPoolUseMode
+	ddns.ExcellentPoolCfg.MinSpeed = ExcellentPoolMinSpeed
+	ddns.ExcellentPoolCfg.MaxDelay = ExcellentPoolMaxDelay
+	ddns.ExcellentPoolCfg.MaxLossRate = ExcellentPoolMaxLoss
+	ddns.ExcellentPoolCfg.MaxSize = ExcellentPoolMaxSize
+	ddns.ExcellentPoolCfg.AutoRemoveSlow = ExcellentPoolAutoRemove
 }

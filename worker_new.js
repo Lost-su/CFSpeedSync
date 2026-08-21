@@ -78,19 +78,25 @@ async function getAllData(prefixes) {
     let allIPv4 = [], allIPv6 = [];
     let latestIPv4Time = null, latestIPv6Time = null;
 
-    const defv4 = await KV_NAMESPACE.get('ipv4');
-    const defv6 = await KV_NAMESPACE.get('ipv6');
-    const defv4t = await KV_NAMESPACE.get('ipv4time');
-    const defv6t = await KV_NAMESPACE.get('ipv6time');
+    // 构建所有需要读取的 key
+    const keys = ['ipv4', 'ipv6', 'ipv4time', 'ipv6time'];
+    const allKeys = [...keys];
+    prefixes.forEach(prefix => {
+      keys.forEach(key => allKeys.push(prefix + ':' + key));
+    });
+
+    // 并行读取所有 KV
+    const results = await Promise.all(allKeys.map(key => KV_NAMESPACE.get(key)));
+
+    // 解析默认keys（前4个）
+    const [defv4, defv6, defv4t, defv6t] = results.slice(0, 4);
     if (defv4) { allIPv4.push(defv4); latestIPv4Time = defv4t; }
     if (defv6) { allIPv6.push(defv6); latestIPv6Time = defv6t; }
 
-    for (const prefix of prefixes) {
-      const p = prefix + ':';
-      const v4 = await KV_NAMESPACE.get(p + 'ipv4');
-      const v6 = await KV_NAMESPACE.get(p + 'ipv6');
-      const v4t = await KV_NAMESPACE.get(p + 'ipv4time');
-      const v6t = await KV_NAMESPACE.get(p + 'ipv6time');
+    // 解析prefix keys（每4个一组）
+    for (let i = 0; i < prefixes.length; i++) {
+      const offset = 4 + i * 4;
+      const [v4, v6, v4t, v6t] = results.slice(offset, offset + 4);
       if (v4) { allIPv4.push(v4); if (!latestIPv4Time || (v4t && v4t > latestIPv4Time)) latestIPv4Time = v4t; }
       if (v6) { allIPv6.push(v6); if (!latestIPv6Time || (v6t && v6t > latestIPv6Time)) latestIPv6Time = v6t; }
     }

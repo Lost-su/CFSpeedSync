@@ -257,6 +257,19 @@ func speedTest() ([]string, error) {
 	return ipData, err
 }
 
+// excellentPoolVersions 将 poolVersion 展开为实际的优良库 KV 版本列表
+// "ip"（混合测速，未按 IPv4/IPv6 分文件）需要同时覆盖 ipv4 和 ipv6 两个独立的库
+func excellentPoolVersions(poolVersion string) []string {
+	switch poolVersion {
+	case "ipv4", "ipv6":
+		return []string{poolVersion}
+	case "ip":
+		return []string{"ipv4", "ipv6"}
+	default:
+		return nil
+	}
+}
+
 func singleSpeedTest(ipVersion string, poolVersion string) (utils.DownloadSpeedSet, error) {
 	// 保存原始 IPText，优良库注入后需要恢复
 	origIPText := task.IPText
@@ -266,6 +279,7 @@ func singleSpeedTest(ipVersion string, poolVersion string) (utils.DownloadSpeedS
 
 	poolLoaded := false
 	var poolEntries []ddns.ExcellentEntry
+	poolVersions := excellentPoolVersions(poolVersion)
 
 	if poolVersion != "" && !conf.EnableExcellentPool {
 		utils.LogInfo("[优良库] 未启用，如需开启请在配置文件中设置 [excellent_pool] enable = true")
@@ -274,11 +288,15 @@ func singleSpeedTest(ipVersion string, poolVersion string) (utils.DownloadSpeedS
 	} else if conf.EnableExcellentPool && conf.EnableCFKV && poolVersion != "" {
 		utils.LogInfo("[优良库] 已启用 (模式: %s, 入库标准: 速度≥%.1f MB/s, 延迟≤%d ms, 丢包率≤%.2f)",
 			conf.ExcellentPoolUseMode, conf.ExcellentPoolMinSpeed, conf.ExcellentPoolMaxDelay, conf.ExcellentPoolMaxLoss)
-		entries, err := ddns.LoadExcellentPool(poolVersion)
-		if err != nil {
-			utils.LogWarn("[优良库] 读取优良库失败，使用常规测速: %v", err)
-		} else if len(entries) > 0 {
-			poolEntries = entries
+		for _, v := range poolVersions {
+			entries, err := ddns.LoadExcellentPool(v)
+			if err != nil {
+				utils.LogWarn("[优良库] 读取 %s 优良库失败，使用常规测速: %v", v, err)
+				continue
+			}
+			poolEntries = append(poolEntries, entries...)
+		}
+		if len(poolEntries) > 0 {
 			poolLoaded = true
 		} else {
 			utils.LogInfo("[优良库] 优良库为空（首次运行或已清空），使用常规测速")
@@ -381,18 +399,18 @@ func singleSpeedTest(ipVersion string, poolVersion string) (utils.DownloadSpeedS
 	utils.ExportCsv(speedData)
 	speedData.Print()
 
-	// 更新优良库
+	// 更新优良库（混合模式下按 ipv4/ipv6 分别写回，与 KV key 结构保持一致）
 	if conf.EnableExcellentPool && conf.EnableCFKV && poolVersion != "" {
-		var ipDataForPool []utils.IPData
-		if poolVersion == "ipv4" {
-			ipDataForPool = speedData.FilterIPv4()
-		} else if poolVersion == "ipv6" {
-			ipDataForPool = speedData.FilterIPv6()
-		} else {
-			ipDataForPool = append(speedData.FilterIPv4(), speedData.FilterIPv6()...)
-		}
-		if updateErr := ddns.UpdateExcellentPool(poolVersion, ipDataForPool); updateErr != nil {
-			utils.LogError("[优良库] 更新优良库失败: %v", updateErr)
+		for _, v := range poolVersions {
+			var ipDataForPool []utils.IPData
+			if v == "ipv4" {
+				ipDataForPool = speedData.FilterIPv4()
+			} else {
+				ipDataForPool = speedData.FilterIPv6()
+			}
+			if updateErr := ddns.UpdateExcellentPool(v, ipDataForPool); updateErr != nil {
+				utils.LogError("[优良库] 更新 %s 优良库失败: %v", v, updateErr)
+			}
 		}
 	}
 

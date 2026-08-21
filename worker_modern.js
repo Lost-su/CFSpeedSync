@@ -214,20 +214,26 @@ async function loadFamily(kv, keySet, scopes, source, family) {
     return { rows: sortRows(rows, 'speed'), updatedAt };
   }
 
-  const values = await Promise.all(availableScopes.flatMap((scope) => [
-    kv.get(scopedKey(scope, dataSuffix)),
-    keySet.has(scopedKey(scope, timeSuffix))
-      ? kv.get(scopedKey(scope, timeSuffix))
-      : Promise.resolve(null),
-  ]));
+  // 并行读取所有数据和时间键
+  const allKeys = availableScopes.flatMap((scope) => [
+    scopedKey(scope, dataSuffix),
+    keySet.has(scopedKey(scope, timeSuffix)) ? scopedKey(scope, timeSuffix) : null,
+  ].filter(Boolean));
+
+  const values = await Promise.all(allKeys.map((key) => kv.get(key)));
 
   const rows = [];
   let updatedAt = null;
-  availableScopes.forEach((scope, index) => {
-    const rawData = values[index * 2];
-    const rawTime = values[index * 2 + 1];
+  let valueIndex = 0;
+
+  availableScopes.forEach((scope) => {
+    const rawData = values[valueIndex++];
     rows.push(...parseLatestRows(rawData, scope));
-    if (rawTime && (!updatedAt || rawTime > updatedAt)) updatedAt = rawTime;
+
+    if (keySet.has(scopedKey(scope, timeSuffix))) {
+      const rawTime = values[valueIndex++];
+      if (rawTime && (!updatedAt || rawTime > updatedAt)) updatedAt = rawTime;
+    }
   });
 
   return { rows: sortRows(rows, 'speed'), updatedAt };
